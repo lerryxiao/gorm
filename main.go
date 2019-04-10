@@ -726,12 +726,14 @@ func (s *DB) print(v ...interface{}) {
 
 func (s *DB) log(v ...interface{}) {
 	if s != nil && s.logMode == 2 {
-		s.print(append([]interface{}{"log", fileWithLineNum()}, v...)...)
+		//s.print(append([]interface{}{"log", fileWithLineNum()}, v...)...)
+		s.print("log", v)
 	}
 }
 
 func (s *DB) slog(sql string, t time.Time, vars ...interface{}) {
 	if s.logMode == 2 {
-		s.print("sql", fileWithLineNum(), NowFunc().Sub(t), sql, vars)
+		//s.print("sql", fileWithLineNum(), NowFunc().Sub(t), sql, vars)
+		s.print("sql", NowFunc().Sub(t), sql, vars)
 	}
 }
