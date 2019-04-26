@@ -26,7 +26,7 @@ func isPrintable(s string) bool {
 	return true
 }
 
-// LogFormatter ÈÕÖ¾¸ñÊ½»¯·½·¨
+// LogFormatter æ—¥å¿—æ ¼å¼åŒ–æ–¹æ³•
 var LogFormatter = func(values ...interface{}) (messages []interface{}) {
 	if len(values) > 1 {
 		var (
