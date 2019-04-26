@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jinzhu/gorm"
+	"github.com/lerryxiao/gorm"
 )
 
 func getPreloadUser(name string) *User {
@@ -92,6 +92,58 @@ func TestPreload(t *testing.T) {
 			t.Errorf("should not preload any emails for other users when with condition")
 		} else if user.Emails == nil {
 			t.Errorf("should return an empty slice to indicate zero results")
+		}
+	}
+}
+
+func TestAutoPreload(t *testing.T) {
+	user1 := getPreloadUser("auto_user1")
+	DB.Save(user1)
+
+	preloadDB := DB.Set("gorm:auto_preload", true).Where("role = ?", "Preload")
+	var user User
+	preloadDB.Find(&user)
+	checkUserHasPreloadData(user, t)
+
+	user2 := getPreloadUser("auto_user2")
+	DB.Save(user2)
+
+	var users []User
+	preloadDB.Find(&users)
+
+	for _, user := range users {
+		checkUserHasPreloadData(user, t)
+	}
+
+	var users2 []*User
+	preloadDB.Find(&users2)
+
+	for _, user := range users2 {
+		checkUserHasPreloadData(*user, t)
+	}
+}
+
+func TestAutoPreloadFalseDoesntPreload(t *testing.T) {
+	user1 := getPreloadUser("auto_user1")
+	DB.Save(user1)
+
+	preloadDB := DB.Set("gorm:auto_preload", false).Where("role = ?", "Preload")
+	var user User
+	preloadDB.Find(&user)
+
+	if user.BillingAddress.Address1 != "" {
+		t.Error("AutoPreload was set to fasle, but still fetched data")
+	}
+
+	user2 := getPreloadUser("auto_user2")
+	DB.Save(user2)
+
+	var users []User
+	preloadDB.Find(&users)
+
+	for _, user := range users {
+		if user.BillingAddress.Address1 != "" {
+			t.Error("AutoPreload was set to fasle, but still fetched data")
 		}
 	}
 }
@@ -719,6 +771,7 @@ func TestNestedPreload11(t *testing.T) {
 	levelB3 := &LevelB3{
 		Value:     "bar",
 		LevelB1ID: sql.NullInt64{Valid: true, Int64: int64(levelB1.ID)},
+		LevelB2s:  []*LevelB2{},
 	}
 	if err := DB.Create(levelB3).Error; err != nil {
 		t.Error(err)
@@ -798,7 +851,7 @@ func TestNestedPreload12(t *testing.T) {
 }
 
 func TestManyToManyPreloadWithMultiPrimaryKeys(t *testing.T) {
-	if dialect := os.Getenv("GORM_DIALECT"); dialect == "" || dialect == "sqlite" {
+	if dialect := os.Getenv("GORM_DIALECT"); dialect == "" || dialect == "sqlite" || dialect == "mssql" {
 		return
 	}
 
@@ -1597,6 +1650,48 @@ func TestPrefixedPreloadDuplication(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %s; want %s", toJSONString(got), toJSONString(want))
+	}
+}
+
+func TestPreloadManyToManyCallbacks(t *testing.T) {
+	type (
+		Level2 struct {
+			ID   uint
+			Name string
+		}
+		Level1 struct {
+			ID      uint
+			Name    string
+			Level2s []Level2 `gorm:"many2many:level1_level2s;AssociationForeignKey:ID;ForeignKey:ID"`
+		}
+	)
+
+	DB.DropTableIfExists("level1_level2s")
+	DB.DropTableIfExists(new(Level1))
+	DB.DropTableIfExists(new(Level2))
+
+	if err := DB.AutoMigrate(new(Level1), new(Level2)).Error; err != nil {
+		t.Error(err)
+	}
+
+	lvl := Level1{
+		Name: "l1",
+		Level2s: []Level2{
+			{Name: "l2-1"}, {Name: "l2-2"},
+		},
+	}
+	DB.Save(&lvl)
+
+	called := 0
+
+	DB.Callback().Query().After("gorm:query").Register("TestPreloadManyToManyCallbacks", func(scope *gorm.Scope) {
+		called = called + 1
+	})
+
+	DB.Preload("Level2s").First(&Level1{}, "id = ?", lvl.ID)
+
+	if called != 3 {
+		t.Errorf("Wanted callback to be called 3 times but got %d", called)
 	}
 }
 

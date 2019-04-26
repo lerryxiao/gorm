@@ -8,15 +8,17 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/erikstmartin/go-testdb"
-	"github.com/jinzhu/gorm"
-	_ "github.com/jinzhu/gorm/dialects/mssql"
-	_ "github.com/jinzhu/gorm/dialects/mysql"
-	"github.com/jinzhu/gorm/dialects/postgres"
-	_ "github.com/jinzhu/gorm/dialects/sqlite"
+	"github.com/lerryxiao/gorm"
+	_ "github.com/lerryxiao/gorm/dialects/mssql"
+	_ "github.com/lerryxiao/gorm/dialects/mysql"
+	"github.com/lerryxiao/gorm/dialects/postgres"
+	_ "github.com/lerryxiao/gorm/dialects/sqlite"
 	"github.com/jinzhu/now"
 )
 
@@ -36,30 +38,31 @@ func init() {
 }
 
 func OpenTestConnection() (db *gorm.DB, err error) {
+	dbDSN := os.Getenv("GORM_DSN")
 	switch os.Getenv("GORM_DIALECT") {
 	case "mysql":
-		// CREATE USER 'gorm'@'localhost' IDENTIFIED BY 'gorm';
-		// CREATE DATABASE gorm;
-		// GRANT ALL ON gorm.* TO 'gorm'@'localhost';
 		fmt.Println("testing mysql...")
-		dbhost := os.Getenv("GORM_DBADDRESS")
-		if dbhost != "" {
-			dbhost = fmt.Sprintf("tcp(%v)", dbhost)
+		if dbDSN == "" {
+			dbDSN = "gorm:gorm@tcp(localhost:9910)/gorm?charset=utf8&parseTime=True"
 		}
-		db, err = gorm.Open("mysql", fmt.Sprintf("gorm:gorm@%v/gorm?charset=utf8&parseTime=True", dbhost))
+		db, err = gorm.Open("mysql", dbDSN)
 	case "postgres":
 		fmt.Println("testing postgres...")
-		dbhost := os.Getenv("GORM_DBHOST")
-		if dbhost != "" {
-			dbhost = fmt.Sprintf("host=%v ", dbhost)
+		if dbDSN == "" {
+			dbDSN = "user=gorm password=gorm DB.name=gorm port=9920 sslmode=disable"
 		}
-		db, err = gorm.Open("postgres", fmt.Sprintf("%vuser=gorm password=gorm DB.name=gorm sslmode=disable", dbhost))
-	case "foundation":
-		fmt.Println("testing foundation...")
-		db, err = gorm.Open("foundation", "dbname=gorm port=15432 sslmode=disable")
+		db, err = gorm.Open("postgres", dbDSN)
 	case "mssql":
+		// CREATE LOGIN gorm WITH PASSWORD = 'LoremIpsum86';
+		// CREATE DATABASE gorm;
+		// USE gorm;
+		// CREATE USER gorm FROM LOGIN gorm;
+		// sp_changedbowner 'gorm';
 		fmt.Println("testing mssql...")
-		db, err = gorm.Open("mssql", "server=SERVER_HERE;database=rogue;user id=USER_HERE;password=PW_HERE;port=1433")
+		if dbDSN == "" {
+			dbDSN = "sqlserver://gorm:LoremIpsum86@localhost:9930?database=gorm"
+		}
+		db, err = gorm.Open("mssql", dbDSN)
 	default:
 		fmt.Println("testing sqlite3...")
 		db, err = gorm.Open("sqlite3", filepath.Join(os.TempDir(), "gorm.db"))
@@ -67,13 +70,31 @@ func OpenTestConnection() (db *gorm.DB, err error) {
 
 	// db.SetLogger(Logger{log.New(os.Stdout, "\r\n", 0)})
 	// db.SetLogger(log.New(os.Stdout, "\r\n", 0))
-	if os.Getenv("DEBUG") == "true" {
+	if debug := os.Getenv("DEBUG"); debug == "true" {
 		db.LogMode(true)
+	} else if debug == "false" {
+		db.LogMode(false)
 	}
 
 	db.DB().SetMaxIdleConns(10)
 
 	return
+}
+
+func TestOpen_ReturnsError_WithBadArgs(t *testing.T) {
+	stringRef := "foo"
+	testCases := []interface{}{42, time.Now(), &stringRef}
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("%v", tc), func(t *testing.T) {
+			_, err := gorm.Open("postgresql", tc)
+			if err == nil {
+				t.Error("Should got error with invalid database source")
+			}
+			if !strings.HasPrefix(err.Error(), "invalid database source:") {
+				t.Errorf("Should got error starting with \"invalid database source:\", but got %q", err.Error())
+			}
+		})
+	}
 }
 
 func TestStringPrimaryKey(t *testing.T) {
@@ -254,6 +275,30 @@ func TestTableName(t *testing.T) {
 	if DB.NewScope([]Cart{}).TableName() != "shopping_cart" {
 		t.Errorf("[]Cart's singular table name should be shopping_cart")
 	}
+	DB.SingularTable(false)
+}
+
+func TestTableNameConcurrently(t *testing.T) {
+	DB := DB.Model("")
+	if DB.NewScope(Order{}).TableName() != "orders" {
+		t.Errorf("Order's table name should be orders")
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(10)
+
+	for i := 1; i <= 10; i++ {
+		go func(db *gorm.DB) {
+			DB.SingularTable(true)
+			wg.Done()
+		}(DB)
+	}
+	wg.Wait()
+
+	if DB.NewScope(Order{}).TableName() != "order" {
+		t.Errorf("Order's singular table name should be order")
+	}
+
 	DB.SingularTable(false)
 }
 
@@ -561,6 +606,60 @@ func TestJoins(t *testing.T) {
 	}
 }
 
+type JoinedIds struct {
+	UserID           int64 `gorm:"column:id"`
+	BillingAddressID int64 `gorm:"column:id"`
+	EmailID          int64 `gorm:"column:id"`
+}
+
+func TestScanIdenticalColumnNames(t *testing.T) {
+	var user = User{
+		Name:  "joinsIds",
+		Email: "joinIds@example.com",
+		BillingAddress: Address{
+			Address1: "One Park Place",
+		},
+		Emails: []Email{{Email: "join1@example.com"}, {Email: "join2@example.com"}},
+	}
+	DB.Save(&user)
+
+	var users []JoinedIds
+	DB.Select("users.id, addresses.id, emails.id").Table("users").
+		Joins("left join addresses on users.billing_address_id = addresses.id").
+		Joins("left join emails on emails.user_id = users.id").
+		Where("name = ?", "joinsIds").Scan(&users)
+
+	if len(users) != 2 {
+		t.Fatal("should find two rows using left join")
+	}
+
+	if user.Id != users[0].UserID {
+		t.Errorf("Expected result row to contain UserID %d, but got %d", user.Id, users[0].UserID)
+	}
+	if user.Id != users[1].UserID {
+		t.Errorf("Expected result row to contain UserID %d, but got %d", user.Id, users[1].UserID)
+	}
+
+	if user.BillingAddressID.Int64 != users[0].BillingAddressID {
+		t.Errorf("Expected result row to contain BillingAddressID %d, but got %d", user.BillingAddressID.Int64, users[0].BillingAddressID)
+	}
+	if user.BillingAddressID.Int64 != users[1].BillingAddressID {
+		t.Errorf("Expected result row to contain BillingAddressID %d, but got %d", user.BillingAddressID.Int64, users[0].BillingAddressID)
+	}
+
+	if users[0].EmailID == users[1].EmailID {
+		t.Errorf("Email ids should be unique. Got %d and %d", users[0].EmailID, users[1].EmailID)
+	}
+
+	if int64(user.Emails[0].Id) != users[0].EmailID && int64(user.Emails[1].Id) != users[0].EmailID {
+		t.Errorf("Expected result row ID to be either %d or %d, but was %d", user.Emails[0].Id, user.Emails[1].Id, users[0].EmailID)
+	}
+
+	if int64(user.Emails[0].Id) != users[1].EmailID && int64(user.Emails[1].Id) != users[1].EmailID {
+		t.Errorf("Expected result row ID to be either %d or %d, but was %d", user.Emails[0].Id, user.Emails[1].Id, users[1].EmailID)
+	}
+}
+
 func TestJoinsWithSelect(t *testing.T) {
 	type result struct {
 		Name  string
@@ -602,9 +701,95 @@ func TestHaving(t *testing.T) {
 	}
 }
 
+func TestQueryBuilderSubselectInWhere(t *testing.T) {
+	user := User{Name: "query_expr_select_ruser1", Email: "root@user1.com", Age: 32}
+	DB.Save(&user)
+	user = User{Name: "query_expr_select_ruser2", Email: "nobody@user2.com", Age: 16}
+	DB.Save(&user)
+	user = User{Name: "query_expr_select_ruser3", Email: "root@user3.com", Age: 64}
+	DB.Save(&user)
+	user = User{Name: "query_expr_select_ruser4", Email: "somebody@user3.com", Age: 128}
+	DB.Save(&user)
+
+	var users []User
+	DB.Select("*").Where("name IN (?)", DB.
+		Select("name").Table("users").Where("name LIKE ?", "query_expr_select%").QueryExpr()).Find(&users)
+
+	if len(users) != 4 {
+		t.Errorf("Four users should be found, instead found %d", len(users))
+	}
+
+	DB.Select("*").Where("name LIKE ?", "query_expr_select%").Where("age >= (?)", DB.
+		Select("AVG(age)").Table("users").Where("name LIKE ?", "query_expr_select%").QueryExpr()).Find(&users)
+
+	if len(users) != 2 {
+		t.Errorf("Two users should be found, instead found %d", len(users))
+	}
+}
+
+func TestQueryBuilderRawQueryWithSubquery(t *testing.T) {
+	user := User{Name: "subquery_test_user1", Age: 10}
+	DB.Save(&user)
+	user = User{Name: "subquery_test_user2", Age: 11}
+	DB.Save(&user)
+	user = User{Name: "subquery_test_user3", Age: 12}
+	DB.Save(&user)
+
+	var count int
+	err := DB.Raw("select count(*) from (?) tmp",
+		DB.Table("users").
+			Select("name").
+			Where("age >= ? and name in (?)", 10, []string{"subquery_test_user1", "subquery_test_user2"}).
+			Group("name").
+			QueryExpr(),
+	).Count(&count).Error
+
+	if err != nil {
+		t.Errorf("Expected to get no errors, but got %v", err)
+	}
+	if count != 2 {
+		t.Errorf("Row count must be 2, instead got %d", count)
+	}
+
+	err = DB.Raw("select count(*) from (?) tmp",
+		DB.Table("users").
+			Select("name").
+			Where("name LIKE ?", "subquery_test%").
+			Not("age <= ?", 10).Not("name in (?)", []string{"subquery_test_user1", "subquery_test_user2"}).
+			Group("name").
+			QueryExpr(),
+	).Count(&count).Error
+
+	if err != nil {
+		t.Errorf("Expected to get no errors, but got %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Row count must be 1, instead got %d", count)
+	}
+}
+
+func TestQueryBuilderSubselectInHaving(t *testing.T) {
+	user := User{Name: "query_expr_having_ruser1", Email: "root@user1.com", Age: 64}
+	DB.Save(&user)
+	user = User{Name: "query_expr_having_ruser2", Email: "root@user2.com", Age: 128}
+	DB.Save(&user)
+	user = User{Name: "query_expr_having_ruser3", Email: "root@user1.com", Age: 64}
+	DB.Save(&user)
+	user = User{Name: "query_expr_having_ruser4", Email: "root@user2.com", Age: 128}
+	DB.Save(&user)
+
+	var users []User
+	DB.Select("AVG(age) as avgage").Where("name LIKE ?", "query_expr_having_%").Group("email").Having("AVG(age) > (?)", DB.
+		Select("AVG(age)").Where("name LIKE ?", "query_expr_having_%").Table("users").QueryExpr()).Find(&users)
+
+	if len(users) != 1 {
+		t.Errorf("Two user group should be found, instead found %d", len(users))
+	}
+}
+
 func DialectHasTzSupport() bool {
 	// NB: mssql and FoundationDB do not support time zones.
-	if dialect := os.Getenv("GORM_DIALECT"); dialect == "mssql" || dialect == "foundation" {
+	if dialect := os.Getenv("GORM_DIALECT"); dialect == "foundation" {
 		return false
 	}
 	return true
@@ -773,6 +958,94 @@ func TestOpenWithOneParameter(t *testing.T) {
 	}
 }
 
+func TestSaveAssociations(t *testing.T) {
+	db := DB.New()
+	deltaAddressCount := 0
+	if err := db.Model(&Address{}).Count(&deltaAddressCount).Error; err != nil {
+		t.Errorf("failed to fetch address count")
+		t.FailNow()
+	}
+
+	placeAddress := &Address{
+		Address1: "somewhere on earth",
+	}
+	ownerAddress1 := &Address{
+		Address1: "near place address",
+	}
+	ownerAddress2 := &Address{
+		Address1: "address2",
+	}
+	db.Create(placeAddress)
+
+	addressCountShouldBe := func(t *testing.T, expectedCount int) {
+		countFromDB := 0
+		t.Helper()
+		err := db.Model(&Address{}).Count(&countFromDB).Error
+		if err != nil {
+			t.Error("failed to fetch address count")
+		}
+		if countFromDB != expectedCount {
+			t.Errorf("address count mismatch: %d", countFromDB)
+		}
+	}
+	addressCountShouldBe(t, deltaAddressCount+1)
+
+	// owner address should be created, place address should be reused
+	place1 := &Place{
+		PlaceAddressID: placeAddress.ID,
+		PlaceAddress:   placeAddress,
+		OwnerAddress:   ownerAddress1,
+	}
+	err := db.Create(place1).Error
+	if err != nil {
+		t.Errorf("failed to store place: %s", err.Error())
+	}
+	addressCountShouldBe(t, deltaAddressCount+2)
+
+	// owner address should be created again, place address should be reused
+	place2 := &Place{
+		PlaceAddressID: placeAddress.ID,
+		PlaceAddress: &Address{
+			ID:       777,
+			Address1: "address1",
+		},
+		OwnerAddress:   ownerAddress2,
+		OwnerAddressID: 778,
+	}
+	err = db.Create(place2).Error
+	if err != nil {
+		t.Errorf("failed to store place: %s", err.Error())
+	}
+	addressCountShouldBe(t, deltaAddressCount+3)
+
+	count := 0
+	db.Model(&Place{}).Where(&Place{
+		PlaceAddressID: placeAddress.ID,
+		OwnerAddressID: ownerAddress1.ID,
+	}).Count(&count)
+	if count != 1 {
+		t.Errorf("only one instance of (%d, %d) should be available, found: %d",
+			placeAddress.ID, ownerAddress1.ID, count)
+	}
+
+	db.Model(&Place{}).Where(&Place{
+		PlaceAddressID: placeAddress.ID,
+		OwnerAddressID: ownerAddress2.ID,
+	}).Count(&count)
+	if count != 1 {
+		t.Errorf("only one instance of (%d, %d) should be available, found: %d",
+			placeAddress.ID, ownerAddress2.ID, count)
+	}
+
+	db.Model(&Place{}).Where(&Place{
+		PlaceAddressID: placeAddress.ID,
+	}).Count(&count)
+	if count != 2 {
+		t.Errorf("two instances of (%d) should be available, found: %d",
+			placeAddress.ID, count)
+	}
+}
+
 func TestBlockGlobalUpdate(t *testing.T) {
 	db := DB.New()
 	db.Create(&Toy{Name: "Stuffed Animal", OwnerType: "Nobody"})
@@ -811,16 +1084,42 @@ func TestBlockGlobalUpdate(t *testing.T) {
 	}
 }
 
+func TestCountWithHaving(t *testing.T) {
+	db := DB.New()
+	db.Delete(User{})
+	defer db.Delete(User{})
+
+	DB.Create(getPreparedUser("user1", "pluck_user"))
+	DB.Create(getPreparedUser("user2", "pluck_user"))
+	user3 := getPreparedUser("user3", "pluck_user")
+	user3.Languages = []Language{}
+	DB.Create(user3)
+
+	var count int
+	err := db.Model(User{}).Select("users.id").
+		Joins("LEFT JOIN user_languages ON user_languages.user_id = users.id").
+		Joins("LEFT JOIN languages ON user_languages.language_id = languages.id").
+		Group("users.id").Having("COUNT(languages.id) > 1").Count(&count).Error
+
+	if err != nil {
+		t.Error("Unexpected error on query count with having")
+	}
+
+	if count != 2 {
+		t.Error("Unexpected result on query count with having")
+	}
+}
+
 func BenchmarkGorm(b *testing.B) {
 	b.N = 2000
 	for x := 0; x < b.N; x++ {
 		e := strconv.Itoa(x) + "benchmark@example.org"
 		now := time.Now()
-		email := BigEmail{Email: e, UserAgent: "pc", RegisteredAt: &now}
+		email := EmailWithIdx{Email: e, UserAgent: "pc", RegisteredAt: &now}
 		// Insert
 		DB.Save(&email)
 		// Query
-		DB.First(&BigEmail{}, "email = ?", e)
+		DB.First(&EmailWithIdx{}, "email = ?", e)
 		// Update
 		DB.Model(&email).UpdateColumn("email", "new-"+e)
 		// Delete
@@ -841,7 +1140,7 @@ func BenchmarkRawSql(b *testing.B) {
 		var id int64
 		e := strconv.Itoa(x) + "benchmark@example.org"
 		now := time.Now()
-		email := BigEmail{Email: e, UserAgent: "pc", RegisteredAt: &now}
+		email := EmailWithIdx{Email: e, UserAgent: "pc", RegisteredAt: &now}
 		// Insert
 		DB.QueryRow(insertSql, email.UserId, email.Email, email.UserAgent, email.RegisteredAt, time.Now(), time.Now()).Scan(&id)
 		// Query
@@ -855,6 +1154,6 @@ func BenchmarkRawSql(b *testing.B) {
 }
 
 func parseTime(str string) *time.Time {
-	t := now.MustParse(str)
+	t := now.New(time.Now().UTC()).MustParse(str)
 	return &t
 }

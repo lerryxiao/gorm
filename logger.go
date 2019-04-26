@@ -26,7 +26,7 @@ func isPrintable(s string) bool {
 	return true
 }
 
-// LogFormatter æ—¥å¿—æ ¼å¼åŒ–æ–¹æ³•
+// LogFormatter ÈÕÖ¾¸ñÊ½»¯·½·¨
 var LogFormatter = func(values ...interface{}) (messages []interface{}) {
 	if len(values) > 1 {
 		var (
@@ -62,7 +62,12 @@ var LogFormatter = func(values ...interface{}) (messages []interface{}) {
 							formattedValues = append(formattedValues, "NULL")
 						}
 					} else {
-						formattedValues = append(formattedValues, fmt.Sprintf("'%v'", value))
+						switch value.(type) {
+						case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
+							formattedValues = append(formattedValues, fmt.Sprintf("%v", value))
+						default:
+							formattedValues = append(formattedValues, fmt.Sprintf("'%v'", value))
+						}
 					}
 				} else {
 					formattedValues = append(formattedValues, "NULL")
