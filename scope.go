@@ -567,10 +567,26 @@ func (scope *Scope) buildCondition(clause map[string]interface{}, include bool) 
 			}
 		}
 	case map[string]interface{}:
-		var sqls []string
+		var (
+			sqls         []string
+			replacements []string
+		)
 		for key, value := range value {
+
 			if value != nil {
-				sqls = append(sqls, fmt.Sprintf("(%v.%v %s %v)", quotedTableName, scope.Quote(key), equalSQL, scope.AddToVars(value)))
+				pos := strings.IndexByte(key, ' ')
+				if pos > 0 {
+					ments, err := scope.checkArv(value)
+					if err != nil {
+						scope.Err(err)
+					}
+					if len(ments) > 0 {
+						replacements = append(replacements, ments...)
+					}
+					sqls = append(sqls, fmt.Sprintf("(%v.%v %s)", quotedTableName, scope.Quote(key[:pos]), key[pos+1:]))
+				} else {
+					sqls = append(sqls, fmt.Sprintf("(%v.%v %s %v)", quotedTableName, scope.Quote(key), equalSQL, scope.AddToVars(value)))
+				}
 			} else {
 				if !include {
 					sqls = append(sqls, fmt.Sprintf("(%v.%v IS NOT NULL)", quotedTableName, scope.Quote(key)))
@@ -579,7 +595,10 @@ func (scope *Scope) buildCondition(clause map[string]interface{}, include bool) 
 				}
 			}
 		}
-		return strings.Join(sqls, " AND ")
+		str = strings.Join(sqls, " AND ")
+		if len(replacements) > 0 {
+			str = scope.replace(str, replacements)
+		}
 	case interface{}:
 		var sqls []string
 		newScope := scope.New(value)
@@ -603,66 +622,75 @@ func (scope *Scope) buildCondition(clause map[string]interface{}, include bool) 
 	replacements := []string{}
 	args := clause["args"].([]interface{})
 	for _, arg := range args {
-		var err error
-		switch reflect.ValueOf(arg).Kind() {
-		case reflect.Slice: // For where("id in (?)", []int64{1,2})
-			if scanner, ok := interface{}(arg).(driver.Valuer); ok {
-				arg, err = scanner.Value()
-				replacements = append(replacements, scope.AddToVars(arg))
-			} else if b, ok := arg.([]byte); ok {
-				replacements = append(replacements, scope.AddToVars(b))
-			} else if as, ok := arg.([][]interface{}); ok {
-				var tempMarks []string
-				for _, a := range as {
-					var arrayMarks []string
-					for _, v := range a {
-						arrayMarks = append(arrayMarks, scope.AddToVars(v))
-					}
-
-					if len(arrayMarks) > 0 {
-						tempMarks = append(tempMarks, fmt.Sprintf("(%v)", strings.Join(arrayMarks, ",")))
-					}
-				}
-
-				if len(tempMarks) > 0 {
-					replacements = append(replacements, strings.Join(tempMarks, ","))
-				}
-			} else if values := reflect.ValueOf(arg); values.Len() > 0 {
-				var tempMarks []string
-				for i := 0; i < values.Len(); i++ {
-					tempMarks = append(tempMarks, scope.AddToVars(values.Index(i).Interface()))
-				}
-				replacements = append(replacements, strings.Join(tempMarks, ","))
-			} else {
-				replacements = append(replacements, scope.AddToVars(Expr("NULL")))
-			}
-		default:
-			if valuer, ok := interface{}(arg).(driver.Valuer); ok {
-				arg, err = valuer.Value()
-			}
-
-			replacements = append(replacements, scope.AddToVars(arg))
-		}
-
+		ments, err := scope.checkArv(arg)
 		if err != nil {
 			scope.Err(err)
 		}
+		if len(ments) > 0 {
+			replacements = append(replacements, ments...)
+		}
 	}
+	str = scope.replace(str, replacements)
 
+	return
+}
+
+func (scope *Scope) replace(str string, ments []string) string {
 	buff := bytes.NewBuffer([]byte{})
 	i := 0
 	for _, s := range str {
-		if s == '?' && len(replacements) > i {
-			buff.WriteString(replacements[i])
+		if s == '?' && len(ments) > i {
+			buff.WriteString(ments[i])
 			i++
 		} else {
 			buff.WriteRune(s)
 		}
 	}
+	return buff.String()
+}
 
-	str = buff.String()
-
-	return
+func (scope *Scope) checkArv(arg interface{}) ([]string, error) {
+	var (
+		err          error
+		replacements = []string{}
+	)
+	switch reflect.ValueOf(arg).Kind() {
+	case reflect.Slice: // For where("id in (?)", []int64{1,2})
+		if scanner, ok := interface{}(arg).(driver.Valuer); ok {
+			arg, err = scanner.Value()
+			replacements = append(replacements, scope.AddToVars(arg))
+		} else if as, ok := arg.([][]interface{}); ok {
+			var tempMarks []string
+			for _, a := range as {
+				var arrayMarks []string
+				for _, v := range a {
+					arrayMarks = append(arrayMarks, scope.AddToVars(v))
+				}
+				if len(arrayMarks) > 0 {
+					tempMarks = append(tempMarks, fmt.Sprintf("(%v)", strings.Join(arrayMarks, ",")))
+				}
+			}
+			if len(tempMarks) > 0 {
+				replacements = append(replacements, strings.Join(tempMarks, ","))
+			}
+		} else if values := reflect.ValueOf(arg); values.Len() > 0 {
+			var tempMarks []string
+			for i := 0; i < values.Len(); i++ {
+				tempMarks = append(tempMarks, scope.AddToVars(values.Index(i).Interface()))
+			}
+			replacements = append(replacements, strings.Join(tempMarks, ","))
+		} else if b, ok := arg.([]byte); ok {
+			replacements = append(replacements, scope.AddToVars(b))
+		} else {
+			replacements = append(replacements, scope.AddToVars(Expr("NULL")))
+		}
+	default:
+		if valuer, ok := interface{}(arg).(driver.Valuer); ok {
+			arg, err = valuer.Value()
+		}
+		replacements = append(replacements, scope.AddToVars(arg))
+	}
+	return replacements, err
 }
 
 func (scope *Scope) buildSelectQuery(clause map[string]interface{}) (str string) {
